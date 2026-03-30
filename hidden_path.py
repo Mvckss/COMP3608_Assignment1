@@ -1,10 +1,9 @@
+import heapq
 import sys
-from collections import deque
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 
 class World(NamedTuple):
-    """Everything needed to run search on one map instance."""
 
     width: int
     height: int
@@ -129,8 +128,6 @@ def teleport_map(grid, width, height):
         return groups
 
     groups = teleport_groups(grid, width, height)
-
-    # Avoid shadowing the function name; this is entrance_coord -> exit_coord
     entrance_to_exit = {}
     for key, entrance_pos in groups.items():
         n = int(key)
@@ -199,23 +196,257 @@ def get_successors_world(x: int, y: int, world: World):
     )
 
 
+def _manhattan_pair(a: Tuple[int, int], b: Tuple[int, int]) -> int:
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def _min_manhattan_to_any_treasure(x: int, y: int, world: World) -> int:
+    if not world.treasures:
+        return 10**9
+    return min(_manhattan_pair((x, y), t) for t in world.treasures)
+
+
+def heuristic_to_nearest_treasure(x: int, y: int, world: World) -> int:
+    if not world.treasures:
+        return 10**9
+    if (x, y) in world.entrance_to_exit:
+        ex, ey = world.entrance_to_exit[(x, y)]
+        return _min_manhattan_to_any_treasure(ex, ey, world)
+    return _min_manhattan_to_any_treasure(x, y, world)
+
+
+def path_willpower_cost(world: World, path: List[Tuple[int, int]]) -> int:
+    if len(path) < 2:
+        return 0
+    total = 0
+    for i in range(len(path) - 1):
+        x, y = path[i]
+        nxt = path[i + 1]
+        for (nx, ny), c in get_successors_world(x, y, world):
+            if (nx, ny) == nxt:
+                total += c
+                break
+    return total
+
+
+def greedy_search(world: World):
+    if not world.treasures:
+        return [], None, None
+
+    start = world.start
+    parent: Dict[Tuple[int, int], Optional[Tuple[int, int]]] = {start: None}
+    closed: set = set()
+    expanded: List[Tuple[int, int]] = []
+
+    h0 = heuristic_to_nearest_treasure(start[0], start[1], world)
+    tie_counter = 0
+    heap: List[Tuple[int, int, int, int]] = []
+    heapq.heappush(heap, (h0, start[0], start[1], tie_counter))
+    tie_counter += 1
+
+    while heap:
+        _h, x, y, _tc = heapq.heappop(heap)
+        if (x, y) in closed:
+            continue
+        closed.add((x, y))
+        expanded.append((x, y))
+
+        if is_goal(x, y, world):
+            goal = (x, y)
+            path = reconstruct_path(parent, start, goal)
+            cost = path_willpower_cost(world, path)
+            return expanded, path, cost
+
+        for (nx, ny), _step in get_successors_world(x, y, world):
+            if (nx, ny) in closed:
+                continue
+            if (nx, ny) in parent:
+                continue
+            parent[(nx, ny)] = (x, y)
+            nh = heuristic_to_nearest_treasure(nx, ny, world)
+            heapq.heappush(heap, (nh, nx, ny, tie_counter))
+            tie_counter += 1
+
+    return expanded, None, None
+
+
+def astar_search(world: World):
+    if not world.treasures:
+        return [], None, None
+
+    start = world.start
+    inf = 10**18
+    g_score: Dict[Tuple[int, int], int] = {start: 0}
+    parent: Dict[Tuple[int, int], Optional[Tuple[int, int]]] = {start: None}
+    closed: set = set()
+    expanded: List[Tuple[int, int]] = []
+
+    tie_counter = 0
+    heap: List[Tuple[int, int, int, int, int]] = []
+    h0 = heuristic_to_nearest_treasure(start[0], start[1], world)
+    heapq.heappush(heap, (h0, start[0], start[1], tie_counter, 0))
+    tie_counter += 1
+
+    while heap:
+        f, x, y, tc, g = heapq.heappop(heap)
+        if g != g_score.get((x, y), inf):
+            continue
+        if (x, y) in closed:
+            continue
+        closed.add((x, y))
+        expanded.append((x, y))
+
+        if is_goal(x, y, world):
+            goal = (x, y)
+            path = reconstruct_path(parent, start, goal)
+            cost = path_willpower_cost(world, path)
+            return expanded, path, cost
+
+        for (nx, ny), step_cost in get_successors_world(x, y, world):
+            if (nx, ny) in closed:
+                continue
+            tentative_g = g + step_cost
+            if tentative_g >= g_score.get((nx, ny), inf):
+                continue
+            g_score[(nx, ny)] = tentative_g
+            parent[(nx, ny)] = (x, y)
+            nh = heuristic_to_nearest_treasure(nx, ny, world)
+            nf = tentative_g + nh
+            heapq.heappush(heap, (nf, nx, ny, tie_counter, tentative_g))
+            tie_counter += 1
+
+    return expanded, None, None
+
+
+def beam_search(world: World, k: int):
+    if not world.treasures:
+        return [], None, None
+    if k <= 0:
+        return [], None, None
+
+    start = world.start
+    parent: Dict[Tuple[int, int], Optional[Tuple[int, int]]] = {start: None}
+
+    expanded_set: set = set()
+    expanded: List[Tuple[int, int]] = []
+
+    beam: List[Tuple[int, int]] = [start]
+
+    while beam:
+        best_prev = min(
+            heuristic_to_nearest_treasure(x, y, world) for (x, y) in beam
+        )
+
+        candidates: Dict[Tuple[int, int], int] = {}
+        next_insertion = 0
+
+        for (x, y) in beam:
+            if (x, y) in expanded_set:
+                continue
+            expanded_set.add((x, y))
+            expanded.append((x, y))
+
+            if is_goal(x, y, world):
+                path = reconstruct_path(parent, start, (x, y))
+                cost = path_willpower_cost(world, path)
+                return expanded, path, cost
+
+            for (nx, ny), _step_cost in get_successors_world(x, y, world):
+                succ = (nx, ny)
+
+                if succ in expanded_set:
+                    continue
+
+                # Keep the first parent f ound / earliest-added successor
+                if succ in candidates:
+                    continue
+                if succ not in parent:
+                    parent[succ] = (x, y)
+
+                candidates[succ] = next_insertion
+                next_insertion += 1
+
+        if not candidates:
+            return expanded, None, None
+
+        best_succ = min(
+            heuristic_to_nearest_treasure(x, y, world) for (x, y) in candidates.keys()
+        )
+
+        if best_succ >= best_prev:
+            return expanded, None, None
+
+        cand_list: List[Tuple[int, int, int, int, Tuple[int, int]]] = []
+        for (sx, sy), ins in candidates.items():
+            h = heuristic_to_nearest_treasure(sx, sy, world)
+            cand_list.append((h, sx, sy, ins, (sx, sy)))
+        cand_list.sort()
+        beam = [s for *_, s in cand_list[:k]]
+
+    return expanded, None, None
+
+
+def run_beam(world: World, k: int) -> None:
+    print("Beam Search Initiated")
+    expanded, path, cost = beam_search(world, k)
+    print(f"Expanded: {format_expanded(expanded)}")
+    if path is None:
+        print("NO PATH FOUND!")
+        return
+    print(f"Path Found: {path}")
+    print(f"Taking this path will cost: {cost} Willpower")
+
+
+def format_expanded(expanded: List[Tuple[int, int]]) -> str:
+    return "".join(f"({x}, {y})" for x, y in expanded)
+
+
+def run_greedy(world: World) -> None:
+    print("Greedy Search Initiated")
+    expanded, path, cost = greedy_search(world)
+    print(f"Expanded: {format_expanded(expanded)}")
+    if path is None:
+        print("NO PATH FOUND!")
+        return
+    print(f"Path Found: {path}")
+    print(f"Taking this path will cost: {cost} Willpower")
+
+
+def run_astar(world: World) -> None:
+    print("A* Search Initiated")
+    expanded, path, cost = astar_search(world)
+    print(f"Expanded: {format_expanded(expanded)}")
+    if path is None:
+        print("NO PATH FOUND!")
+        return
+    print(f"Path Found: {path}")
+    print(f"Taking this path will cost: {cost} Willpower")
+
+
 def main(strategy, filename, param=None):
     world = load_world(filename)
     if world is None:
         return
 
-    print(world)
-    
+    if strategy == "G":
+        run_greedy(world)
+    elif strategy == "A":
+        run_astar(world)
+    elif strategy == "M":
+        run_beam(world, int(param))
+    else:
+        print(world)
+
     return
 
 if __name__ == '__main__':   
+    parameter = None
     if len(sys.argv) < 3:
-        # You can modify these values to test your code
-        strategy = 'B'
+        strategy = 'G'
         filename = 'example2.txt'
     else:
         strategy = sys.argv[1]
         filename = sys.argv[2]
         if len(sys.argv) > 3:
             parameter = sys.argv[3]
-    main(strategy, filename)
+    main(strategy, filename, parameter)
