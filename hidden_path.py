@@ -1,6 +1,7 @@
 import heapq
 import sys
 from typing import Dict, List, NamedTuple, Optional, Tuple
+from collections import deque
 
 
 class World(NamedTuple):
@@ -117,6 +118,16 @@ def reconstruct_path(parent, start, goal):
     path.reverse()
 
     return path
+
+
+def format_expanded(expanded):
+    # Matches assignment examples: tuples concatenated without commas.
+    return "".join(f"({x}, {y})" for x, y in expanded)
+
+
+def format_path(path):
+    # Matches assignment examples: list-like formatting with comma+space.
+    return "[" + ", ".join(f"({x}, {y})" for x, y in path) + "]"
 
 def teleport_map(grid, width, height):
     def teleport_groups(grid, width, height):
@@ -422,21 +433,169 @@ def run_astar(world: World) -> None:
     print(f"Path Found: {path}")
     print(f"Taking this path will cost: {cost} Willpower")
 
+def bfs(world):
+    start = world.start
+    fringe = deque([(start, None, 0)])  
+    expanded = []
+    expanded_set = set()
+    parent = {start: None}
+    path_cost = {start: 0}
+    
+    while fringe:
+        current, parent_state, g = fringe.popleft()
+        if current in expanded_set:
+            continue
+        expanded_set.add(current)
+        expanded.append(current)
+        parent[current] = parent_state
+        path_cost[current] = g
+
+        cx, cy = current
+
+        if is_goal(cx, cy, world):
+            path = reconstruct_path(parent, start, current)
+            return expanded, path, path_cost[current]
+
+        for (nx, ny), step_cost in get_successors_world(cx, cy, world):
+            child = (nx, ny)
+            if child in expanded_set:
+                continue
+            if child not in parent:
+                fringe.append((child, current, path_cost[current] + step_cost))
+    return expanded, None, None
+
+def ucs(world):
+    start = world.start
+    sx, sy = start
+    tie = 0
+    # (g, x, y, tie_break_fifo, state)
+    fringe = [(0, sx, sy, tie, start)]
+    tie += 1
+
+    expanded = []
+    expanded_set = set()
+    parent = {start: None}
+    best_path_cost = {start: 0}
+
+    while fringe:
+        path_cost, _, _, _, current = heapq.heappop(fringe)
+        cx, cy = current
+
+        if current in expanded_set:
+            continue
+
+        expanded_set.add(current)
+        expanded.append(current)
+
+        if is_goal(cx, cy, world):
+            path = reconstruct_path(parent, start, current)
+            return expanded, path, path_cost
+
+        for (nx, ny), step_cost in get_successors_world(cx, cy, world):
+            child = (nx, ny)
+            if child in expanded_set:
+                continue
+            new_path_cost = path_cost + step_cost
+            if new_path_cost < best_path_cost.get(child, float("inf")):
+                best_path_cost[child] = new_path_cost
+                parent[child] = current
+                heapq.heappush(fringe, (new_path_cost, nx, ny, tie, child))
+                tie += 1
+
+    return expanded, None, None
+
+def ids(world, limit):
+    limit = int(limit)
+
+    all_expanded = []
+    last_expanded = []
+
+    for depth_limit in range(limit + 1):  # inclusive (0..l)
+        expanded, path, total_cost = dls(world, depth_limit)
+        all_expanded.extend(expanded)
+        last_expanded = expanded
+
+        if path is not None:
+            return all_expanded, path, total_cost
+
+    return all_expanded if all_expanded else last_expanded, None, None
+
+
+def dls(world, depth_limit):
+    start = world.start
+    # (state, depth, parent_state, cumulative_cost)
+    stack = [(start, 0, None, 0)]
+
+    expanded = []
+    expanded_set = set()
+    parent = {start: None}
+    path_cost = {start: 0}
+
+    while stack:
+        current, current_depth, parent_state, g = stack.pop()
+
+        if current_depth > depth_limit:
+            continue
+        if current in expanded_set:
+            continue
+
+        expanded_set.add(current)
+        expanded.append(current)
+        parent[current] = parent_state
+        path_cost[current] = g
+
+        cx, cy = current
+        if is_goal(cx, cy, world):
+            path = reconstruct_path(parent, start, current)
+            return expanded, path, g
+
+        successors = get_successors_world(cx, cy, world)
+        for (child_state, step_cost) in reversed(successors):
+            nx, ny = child_state
+            stack.append((child_state, current_depth + 1, current, g + step_cost))
+
+    return expanded, None, None
+
+def print_search_result(strategy_name, expanded, path, total_cost):
+    print(f"{strategy_name} Search Initiated")
+    print(f"Expanded: {format_expanded(expanded)}")
+    if path is None:
+        print("NO PATH FOUND!")
+        return
+    print(f"Path Found: {format_path(path)}")
+    print(f"Taking this path will cost: {total_cost} Willpower")
 
 def main(strategy, filename, param=None):
     world = load_world(filename)
     if world is None:
         return
 
-    if strategy == "G":
-        run_greedy(world)
-    elif strategy == "A":
-        run_astar(world)
-    elif strategy == "M":
-        run_beam(world, int(param))
-    else:
-        print(world)
+    if strategy == "B":
+        expanded, path, total_cost = bfs(world)
+        print_search_result("BFS", expanded, path, total_cost)
+        return
 
+    elif strategy == "U":
+        expanded, path, total_cost = ucs(world)
+        print_search_result("UCS", expanded, path, total_cost)
+        return
+    elif strategy == "I":
+        expanded, path, total_cost = ids(world, param)
+        print_search_result("IDS", expanded, path, total_cost)
+        return
+    elif strategy == "G":
+        expanded, path, total_cost = greedy_search(world)
+        print_search_result("Greedy", expanded, path, total_cost)
+        return
+    elif strategy == "A":
+        expanded, path, total_cost = astar_search(world)
+        print_search_result("A*", expanded, path, total_cost)
+        return
+    elif strategy == "M":
+        expanded, path, total_cost = beam_search(world, int(param))
+        print_search_result("Beam", expanded, path, total_cost)
+        return
+    print(f"Strategy '{strategy}' not implemented yet.")
     return
 
 if __name__ == '__main__':   
@@ -444,9 +603,13 @@ if __name__ == '__main__':
     if len(sys.argv) < 3:
         strategy = 'G'
         filename = 'example2.txt'
+        parameter = 5
+        main(strategy, filename, parameter)
     else:
         strategy = sys.argv[1]
         filename = sys.argv[2]
         if len(sys.argv) > 3:
             parameter = sys.argv[3]
-    main(strategy, filename, parameter)
+            main(strategy, filename, parameter)
+        else:
+            main(strategy, filename)
